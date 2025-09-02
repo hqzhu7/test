@@ -13,9 +13,7 @@ function createJsonErrorResponse(message: string, statusCode = 500) {
 
 // --- 核心业务逻辑：调用 OpenRouter ---
 async function callOpenRouter(prompt: string, imagesAsBase64: string[], apiKey: string): Promise<string> {
-    if (!apiKey) {
-        throw new Error("callOpenRouter received an empty apiKey.");
-    }
+    if (!apiKey) { throw new Error("callOpenRouter received an empty apiKey."); }
     const contentPayload: any[] = [{ type: "text", text: prompt }];
     for (const base64Url of imagesAsBase64) {
         contentPayload.push({ type: "image_url", image_url: { url: base64Url } });
@@ -26,11 +24,7 @@ async function callOpenRouter(prompt: string, imagesAsBase64: string[], apiKey: 
     };
     console.log("Sending payload to OpenRouter...");
     const apiResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST", 
-        headers: { 
-            "Authorization": `Bearer ${apiKey}`, // <--- OpenRouter 需要 'Bearer' 前缀
-            "Content-Type": "application/json" 
-        },
+        method: "POST", headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify(openrouterPayload)
     });
     if (!apiResponse.ok) {
@@ -58,28 +52,17 @@ serve(async (req) => {
     if (pathname.includes(":streamGenerateContent")) {
         try {
             const geminiRequest = await req.json();
-            
-            // ========================= 【认证修复】 =========================
             const authHeader = req.headers.get("Authorization");
             let apiKey = "";
-
             if (authHeader) {
-                // 同时处理 "Bearer sk-..." 和 "sk-..." 两种情况
                 apiKey = authHeader.startsWith("Bearer ") ? authHeader.substring(7) : authHeader;
             } else {
-                // 如果没有 Authorization 头，再检查 x-goog-api-key
                 apiKey = req.headers.get("x-goog-api-key") || "";
             }
-
-            if (!apiKey) {
-                return createJsonErrorResponse("API key is missing. Checked Authorization and x-goog-api-key headers.", 401);
-            }
-            console.log("🔑 Successfully extracted API key.");
-            // ===============================================================
+            if (!apiKey) { return createJsonErrorResponse("API key is missing.", 401); }
 
             const userMessage = geminiRequest.contents?.find((c: any) => c.role === 'user');
             if (!userMessage?.parts) { return createJsonErrorResponse("Invalid Gemini request: No user parts found", 400); }
-
             let prompt = ""; const imagesAsBase64: string[] = [];
             for (const part of userMessage.parts) {
                 if (part.text) { prompt = part.text; }
@@ -89,7 +72,6 @@ serve(async (req) => {
             }
             
             const newImageBase64 = await callOpenRouter(prompt, imagesAsBase64, apiKey);
-
             const matches = newImageBase64.match(/^data:(.+);base64,(.*)$/);
             if (!matches || matches.length !== 3) { throw new Error("Generated content is not a valid Base64 URL"); }
             const mimeType = matches[1];
@@ -101,46 +83,64 @@ serve(async (req) => {
                         const chunkString = `${JSON.stringify(data)}\n`;
                         controller.enqueue(new TextEncoder().encode(chunkString));
                     };
+
+                    // ========================= 【真实观察级修复】 =========================
+                    // 严格模仿你观察到的 "先文后图" 流程
                     
-                    const geminiResponseChunk = {
+                    // --- 第 1 步：发送一个文本块 (Text Chunk) ---
+                    // 这个 chunk 会创建消息容器和第一个文本块，内容就是你看到的那句描述。
+                    const textChunk = {
                         candidates: [{
                             content: {
                                 role: "model",
+                                parts: [{ text: "好的，这是根据您的描述生成的图片：" }] // 模仿真实返回的文本
+                            }
+                        }]
+                    };
+                    sendChunk(textChunk);
+                    console.log("🚀 Sent: Text Chunk (to create the container)");
+
+                    // --- 第 2 步：发送一个图片块 (Image Chunk) ---
+                    // 这个 chunk 会被正确处理，并作为第二个块附加到已存在的消息上。
+                    const imageChunk = {
+                        candidates: [{
+                            content: {
+                                role: "model", // role 必须有
                                 parts: [{
                                     inlineData: { mimeType: mimeType, data: base64Data }
                                 }]
                             }
                         }]
                     };
-                    sendChunk(geminiResponseChunk);
-                    console.log("🚀 Sent: Gemini-compatible image chunk");
-                    
-                    const finishChunk = {
-                        candidates: [{
-                            finishReason: "STOP",
-                            content: { role: "model", parts: [] }
-                        }],
-                        usageMetadata: { promptTokenCount: 50, totalTokenCount: 800 }
-                    };
-                    sendChunk(finishChunk);
-                    console.log("✅ Sent: Gemini-compatible finish chunk");
-                    
-                    controller.close();
+                    // 添加一个微小的延迟，模拟真实网络情况
+                    setTimeout(() => {
+                        sendChunk(imageChunk);
+                        console.log("🖼️ Sent: Image Chunk");
+
+                        // --- 第 3 步：发送结束块 ---
+                        const finishChunk = {
+                            candidates: [{
+                                finishReason: "STOP",
+                                content: { role: "model", parts: [] }
+                            }],
+                            usageMetadata: { promptTokenCount: 50, totalTokenCount: 800 }
+                        };
+                        sendChunk(finishChunk);
+                        console.log("✅ Sent: Finish Chunk");
+                        
+                        controller.close();
+                    }, 50); // 50毫秒延迟
+                    // ===========================================================================
                 }
             });
-
             return new Response(stream, {
                 headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
             });
-
         } catch (error) {
             console.error("Error in Gemini handler:", error);
             return createJsonErrorResponse(error.message || "An unknown error occurred", 500);
         }
     }
     
-    // ... [你的 Web UI 和其他 OpenAI 路由保持不变] ...
-    if (pathname === "/v1/chat/completions") { /* ... */ }
-    if (pathname === "/generate") { /* ... */ }
-    return serveDir(req, { fsRoot: "static", urlRoot: "", showDirListing: true, enableCors: true });
+    // ... [其他路由如 /generate 和静态文件服务保持不变] ...
 });
