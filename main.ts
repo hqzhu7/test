@@ -131,8 +131,24 @@ serve(async (req) => {
     }
 
     // --- 路由 3: 你的 Web UI (nano banana) ---
-    if (pathname === "/generate") { /* ... */ }
-    
+    if (pathname === "/generate") {
+        try {
+            const { prompt, images, apikey } = await req.json();
+            const openrouterApiKey = apikey || Deno.env.get("OPENROUTER_API_KEY");
+            if (!openrouterApiKey) { return new Response(JSON.stringify({ error: "OpenRouter API key is not set." }), { status: 500 }); }
+            if (!prompt || !images || !images.length) { return new Response(JSON.stringify({ error: "Prompt and images are required." }), { status: 400 }); }
+            
+            // Web UI 发送的是完整的 Base64 URL 数组，我们需要把它转换成 OpenAI 格式
+            const webUiMessages = [ { role: "user", content: [ {type: "text", text: prompt}, ...images.map(img => ({type: "image_url", image_url: {url: img}})) ] } ];
+            const generatedImageUrl = await callOpenRouter(webUiMessages, openrouterApiKey);
+            
+            return new Response(JSON.stringify({ imageUrl: generatedImageUrl }), { headers: { "Content-Type": "application/json" } });
+        } catch (error) {
+            console.error("Error handling /generate request:", error);
+            return new Response(JSON.stringify({ error: error.message }), { status: 500 });
+        }
+    }
+
     // --- 路由 4: 静态文件服务 ---
-    return serveDir(req, { fsRoot: "static", urlRoot: "" });
+    return serveDir(req, { fsRoot: "static", urlRoot: "", showDirListing: true, enableCors: true });
 });
