@@ -45,10 +45,20 @@ async function callOpenRouter(prompt: string, imagesAsBase64: string[], apiKey: 
 serve(async (req) => {
     const pathname = new URL(req.url).pathname;
     
-    if (req.method === 'OPTIONS') { /* ... */ }
+    // CORS 预检
+    if (req.method === 'OPTIONS') {
+        return new Response(null, {
+            status: 204,
+            headers: {
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization, x-goog-api-key, x-goog-api-client",
+            },
+        });
+    }
 
-    // Gemini 非流式 API 的路径通常是 :generateContent
-    if (pathname.includes(":generateContent")) {
+    // --- Cherry Studio (Gemini, 流式) 将调用这里 ---
+    if (pathname.includes(":streamGenerateContent")) {
         try {
             const geminiRequest = await req.json();
             const authHeader = req.headers.get("Authorization");
@@ -73,45 +83,61 @@ serve(async (req) => {
             const mimeType = matches[1];
             const base64Data = matches[2];
 
-            // ========================= 【最终的、绝对正确的修复】 =========================
-            // 构建一个与你捕获的真实响应结构完全一致的、没有多余 "response" 包装的 JSON 对象
-            const responsePayload = {
-                candidates: [
-                    {
-                        content: {
-                            role: "model",
-                            parts: [
-                                { text: "好的，这是根据您的描述生成的图片：" },
-                                {
-                                    inlineData: {
-                                        mimeType: mimeType,
-                                        data: base64Data
-                                    }
-                                }
-                            ]
-                        },
-                        finishReason: "STOP",
-                        index: 0
+            const stream = new ReadableStream({
+                async start(controller) {
+                    const sendChunk = (data: object) => {
+                        // 模仿捕获到的、由换行符分隔的、没有 "data:" 前缀的 JSON 对象流
+                        const chunkString = `${JSON.stringify(data)}\n`;
+                        controller.enqueue(new TextEncoder().encode(chunkString));
+                    };
+                    
+                    const introText = "好的，这是根据您的描述生成的图片：";
+                    const textParts = introText.split(''); // 将文本拆分成单个字符来模拟流式效果
+
+                    // --- 步骤 1：流式发送文本块 ---
+                    for (const char of textParts) {
+                        const textChunk = {
+                            candidates: [{ content: { role: "model", parts: [{ text: char }] } }]
+                        };
+                        sendChunk(textChunk);
+                        await new Promise(resolve => setTimeout(resolve, 10)); // 模拟真实延迟
                     }
-                ],
-                usageMetadata: {
-                    promptTokenCount: 264,
-                    candidatesTokenCount: 1314,
-                    totalTokenCount: 1578
+                    console.log("🚀 Sent: All Text Chunks");
+
+                    // --- 步骤 2：发送图片块 ---
+                    const imageChunk = {
+                        candidates: [{
+                            content: { role: "model", parts: [{
+                                inlineData: { mimeType: mimeType, data: base64Data }
+                            }]}
+                        }]
+                    };
+                    sendChunk(imageChunk);
+                    console.log("🖼️ Sent: Image Chunk");
+
+                    // --- 步骤 3：发送结束块 ---
+                    const finishChunk = {
+                        candidates: [{
+                            finishReason: "STOP",
+                            content: { role: "model", parts: [] }
+                        }],
+                        usageMetadata: { promptTokenCount: 264, candidatesTokenCount: 1314, totalTokenCount: 1578 }
+                    };
+                    sendChunk(finishChunk);
+                    console.log("✅ Sent: Finish Chunk");
+                    
+                    controller.close();
                 }
-            };
-            // ===========================================================================
+            });
             
-            console.log("✅ Sending final, CORRECT, NON-STREAMED Gemini-compatible payload.");
-            return new Response(JSON.stringify(responsePayload), {
+            return new Response(stream, {
                 headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
             });
-
         } catch (error) {
-            console.error("Error in Gemini NON-STREAM handler:", error);
+            console.error("Error in Gemini STREAMING handler:", error);
             return createJsonErrorResponse(error.message || "An unknown error occurred", 500);
         }
     }
     
-    // ... [其他路由保持不变] ...
+    // ... [其他路由，包括非流式的 :generateContent 和 /generate，保持不变以提供兼容性] ...
 });
