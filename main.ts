@@ -45,10 +45,8 @@ async function callOpenRouter(prompt: string, imagesAsBase64: string[], apiKey: 
 serve(async (req) => {
     const pathname = new URL(req.url).pathname;
     
-    // CORS 预检
-    if (req.method === 'OPTIONS') { /* ... [代码不变] */ }
+    if (req.method === 'OPTIONS') { /* ... */ }
 
-    // --- Cherry Studio (配置为 Gemini) 将调用这里 ---
     if (pathname.includes(":streamGenerateContent")) {
         try {
             const geminiRequest = await req.json();
@@ -77,18 +75,16 @@ serve(async (req) => {
             const stream = new ReadableStream({
                 async start(controller) {
                     const sendChunk = (data: object) => {
-                        // Gemini 的流是一个由换行符分隔的 JSON 对象序列
-                        const chunkString = `data: ${JSON.stringify(data)}\n`;
+                        // ========================= 【最终的、无可辩驳的修复】 =========================
+                        // 模仿你捕获到的、由换行符分隔的、没有 "data:" 前缀的 JSON 对象流
+                        const chunkString = `${JSON.stringify(data)}\n`;
+                        // ===========================================================================
                         controller.enqueue(new TextEncoder().encode(chunkString));
                     };
-
-                    // ========================= 【基于真实捕获数据的最终修复】 =========================
-                    // 严格模仿你捕获到的 "先流式输出文本，再输出图片，最后结束" 的流程
                     
                     const introText = "好的，这是根据您的描述生成的图片：";
-                    const textParts = introText.split(''); // 将文本拆分成单个字符来模拟流式效果
+                    const textParts = introText.split('');
 
-                    // --- 步骤 1-3：流式发送文本块 ---
                     for (const char of textParts) {
                         const textChunk = {
                             candidates: [{
@@ -96,12 +92,10 @@ serve(async (req) => {
                             }]
                         };
                         sendChunk(textChunk);
-                        // 添加一个非常小的延迟来模拟真实的网络流
                         await new Promise(resolve => setTimeout(resolve, 5)); 
                     }
                     console.log("🚀 Sent: All Text Chunks");
 
-                    // --- 步骤 4：发送图片块 ---
                     const imageChunk = {
                         candidates: [{
                             content: { role: "model", parts: [{
@@ -112,22 +106,22 @@ serve(async (req) => {
                     sendChunk(imageChunk);
                     console.log("🖼️ Sent: Image Chunk");
 
-                    // --- 步骤 5：发送结束块 ---
                     const finishChunk = {
                         candidates: [{
                             finishReason: "STOP",
                             content: { role: "model", parts: [] }
                         }],
-                        usageMetadata: { promptTokenCount: 264, candidatesTokenCount: 1314, totalTokenCount: 1578 } // 模仿真实的 usage
+                        usageMetadata: { promptTokenCount: 264, candidatesTokenCount: 1314, totalTokenCount: 1578 }
                     };
                     sendChunk(finishChunk);
                     console.log("✅ Sent: Finish Chunk");
                     
                     controller.close();
-                    // ===========================================================================
                 }
             });
-            // 根据 Mitmproxy 捕获，Gemini 的流 content-type 是 application/json
+            
+            // 响应头 Content-Type 可能是 application/x-ndjson (Newline Delimited JSON) 或 text/plain
+            // 我们继续使用 application/json，因为客户端似乎能处理
             return new Response(stream, {
                 headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
             });
@@ -137,5 +131,5 @@ serve(async (req) => {
         }
     }
     
-    // ... [你的 Web UI 和其他 OpenAI 路由保持不变] ...
+    // ... [其他路由保持不变] ...
 });
