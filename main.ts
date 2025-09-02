@@ -54,11 +54,8 @@ serve(async (req) => {
             const geminiRequest = await req.json();
             const authHeader = req.headers.get("Authorization");
             let apiKey = "";
-            if (authHeader) {
-                apiKey = authHeader.startsWith("Bearer ") ? authHeader.substring(7) : authHeader;
-            } else {
-                apiKey = req.headers.get("x-goog-api-key") || "";
-            }
+            if (authHeader) { apiKey = authHeader.startsWith("Bearer ") ? authHeader.substring(7) : authHeader; } 
+            else { apiKey = req.headers.get("x-goog-api-key") || ""; }
             if (!apiKey) { return createJsonErrorResponse("API key is missing.", 401); }
 
             const userMessage = geminiRequest.contents?.find((c: any) => c.role === 'user');
@@ -78,61 +75,59 @@ serve(async (req) => {
             const base64Data = matches[2];
 
             const stream = new ReadableStream({
-                start(controller) {
+                async start(controller) {
                     const sendChunk = (data: object) => {
-                        const chunkString = `${JSON.stringify(data)}\n`;
+                        // Gemini 的流是一个由换行符分隔的 JSON 对象序列
+                        const chunkString = `data: ${JSON.stringify(data)}\n`;
                         controller.enqueue(new TextEncoder().encode(chunkString));
                     };
 
-                    // ========================= 【真实观察级修复】 =========================
-                    // 严格模仿你观察到的 "先文后图" 流程
+                    // ========================= 【基于真实捕获数据的最终修复】 =========================
+                    // 严格模仿你捕获到的 "先流式输出文本，再输出图片，最后结束" 的流程
                     
-                    // --- 第 1 步：发送一个文本块 (Text Chunk) ---
-                    // 这个 chunk 会创建消息容器和第一个文本块，内容就是你看到的那句描述。
-                    const textChunk = {
-                        candidates: [{
-                            content: {
-                                role: "model",
-                                parts: [{ text: "好的，这是根据您的描述生成的图片：" }] // 模仿真实返回的文本
-                            }
-                        }]
-                    };
-                    sendChunk(textChunk);
-                    console.log("🚀 Sent: Text Chunk (to create the container)");
+                    const introText = "好的，这是根据您的描述生成的图片：";
+                    const textParts = introText.split(''); // 将文本拆分成单个字符来模拟流式效果
 
-                    // --- 第 2 步：发送一个图片块 (Image Chunk) ---
-                    // 这个 chunk 会被正确处理，并作为第二个块附加到已存在的消息上。
+                    // --- 步骤 1-3：流式发送文本块 ---
+                    for (const char of textParts) {
+                        const textChunk = {
+                            candidates: [{
+                                content: { role: "model", parts: [{ text: char }] }
+                            }]
+                        };
+                        sendChunk(textChunk);
+                        // 添加一个非常小的延迟来模拟真实的网络流
+                        await new Promise(resolve => setTimeout(resolve, 5)); 
+                    }
+                    console.log("🚀 Sent: All Text Chunks");
+
+                    // --- 步骤 4：发送图片块 ---
                     const imageChunk = {
                         candidates: [{
-                            content: {
-                                role: "model", // role 必须有
-                                parts: [{
-                                    inlineData: { mimeType: mimeType, data: base64Data }
-                                }]
-                            }
+                            content: { role: "model", parts: [{
+                                inlineData: { mimeType: mimeType, data: base64Data }
+                            }]}
                         }]
                     };
-                    // 添加一个微小的延迟，模拟真实网络情况
-                    setTimeout(() => {
-                        sendChunk(imageChunk);
-                        console.log("🖼️ Sent: Image Chunk");
+                    sendChunk(imageChunk);
+                    console.log("🖼️ Sent: Image Chunk");
 
-                        // --- 第 3 步：发送结束块 ---
-                        const finishChunk = {
-                            candidates: [{
-                                finishReason: "STOP",
-                                content: { role: "model", parts: [] }
-                            }],
-                            usageMetadata: { promptTokenCount: 50, totalTokenCount: 800 }
-                        };
-                        sendChunk(finishChunk);
-                        console.log("✅ Sent: Finish Chunk");
-                        
-                        controller.close();
-                    }, 50); // 50毫秒延迟
+                    // --- 步骤 5：发送结束块 ---
+                    const finishChunk = {
+                        candidates: [{
+                            finishReason: "STOP",
+                            content: { role: "model", parts: [] }
+                        }],
+                        usageMetadata: { promptTokenCount: 264, candidatesTokenCount: 1314, totalTokenCount: 1578 } // 模仿真实的 usage
+                    };
+                    sendChunk(finishChunk);
+                    console.log("✅ Sent: Finish Chunk");
+                    
+                    controller.close();
                     // ===========================================================================
                 }
             });
+            // 根据 Mitmproxy 捕获，Gemini 的流 content-type 是 application/json
             return new Response(stream, {
                 headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
             });
@@ -142,5 +137,5 @@ serve(async (req) => {
         }
     }
     
-    // ... [其他路由如 /generate 和静态文件服务保持不变] ...
+    // ... [你的 Web UI 和其他 OpenAI 路由保持不变] ...
 });
