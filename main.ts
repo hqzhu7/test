@@ -1,20 +1,24 @@
 import { serve } from "https://deno.land/std@0.200.0/http/server.ts";
 import { serveDir } from "https://deno.land/std@0.200.0/http/file_server.ts";
 
+// ... [createOpenAIErrorResponse 和 callOpenRouter 函数保持不变] ...
 // --- 辅助函数：用于生成 OpenAI 格式的错误响应 ---
 function createOpenAIErrorResponse(message: string, statusCode = 500) {
     const errorPayload = {
         error: { message: message, type: "server_error" }
     };
     console.error("Replying with error:", JSON.stringify(errorPayload, null, 2));
+    // 错误响应不需要流式，保持原样
     return new Response(JSON.stringify(errorPayload), {
-        status: statusCode, headers: { "Content-Type": "application/json" }
+        status: statusCode, headers: { 
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*", // 添加 CORS 头
+        }
     });
 }
 
-// --- 核心业务逻辑：调用 OpenRouter (保持不变) ---
-async function callOpenRouter(prompt: string, images: string[], apiKey: string) {
-    // ... 这部分代码无需改动
+// --- 核心业务逻辑：调用 OpenRouter ---
+async function callOpenRouter(prompt: string, images: string[], apiKey: string): Promise<string> {
     const contentPayload: any[] = [{ type: "text", text: prompt }];
     if (images && images.length > 0) {
         for (const imageUrl of images) {
@@ -64,10 +68,21 @@ async function callOpenRouter(prompt: string, images: string[], apiKey: string) 
 serve(async (req) => {
     const pathname = new URL(req.url).pathname;
 
+    // 添加 OPTIONS 方法处理，用于 CORS 预检请求
+    if (req.method === 'OPTIONS') {
+        return new Response(null, {
+            status: 204,
+            headers: {
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key, X-Stainless-Retry-Count, X-Stainless-Timeout, Traceparent",
+            },
+        });
+    }
+    
     // --- 兼容 OpenAI API 的端点 ---
     if (pathname === "/v1/chat/completions") {
         try {
-            // --- 增强日志 ---
             console.log("🎁 Received Headers from Cherry Studio:", JSON.stringify(Object.fromEntries(req.headers.entries()), null, 2));
             const openaiRequest = await req.json();
             console.log("📦 Received Body from Cherry Studio:", JSON.stringify(openaiRequest, null, 2));
@@ -97,47 +112,69 @@ serve(async (req) => {
 
             const generatedImageUrl = await callOpenRouter(prompt, images, openrouterApiKey);
 
-            // ========================= 【最终修复】 =========================
             const responsePayload = {
                 id: `chatcmpl-${crypto.randomUUID()}`,
-                object: "chat.completion",
+                object: "chat.completion.chunk", // <-- 注意：在流式响应中，对象类型通常是 .chunk
                 created: Math.floor(Date.now() / 1000),
                 model: requestedModel,
                 choices: [{
                     index: 0,
-                    message: {
+                    delta: { // <-- 注意：在流式响应中，字段是 delta
                         role: "assistant",
-                        // 1. 增加一个空的 text 部分，增强兼容性
                         content: [
                             { type: "text", text: "" },
                             { type: "image_url", image_url: { "url": generatedImageUrl } }
                         ]
                     },
-                    finish_reason: "stop"
+                    finish_reason: "stop" // 可以在最后一个 chunk 中发送
                 }],
-                // 2. 伪造一个看起来真实的 usage 对象
-                usage: {
-                    prompt_tokens: 50,      // 伪造值
-                    completion_tokens: 700, // 伪造值
-                    total_tokens: 750       // 伪造值
-                }
+                usage: { prompt_tokens: 50, completion_tokens: 700, total_tokens: 750 }
             };
+
+            console.log("✅ Constructing stream payload for Cherry Studio:", JSON.stringify(responsePayload, null, 2));
+
+            // ========================= 【协议级修复】 =========================
+            // 1. 创建一个可读流 (ReadableStream)
+            const stream = new ReadableStream({
+                start(controller) {
+                    // 2. 将完整的 JSON 对象编码后放入一个 "data: " 块中
+                    const chunk = `data: ${JSON.stringify(responsePayload)}\n\n`;
+                    controller.enqueue(new TextEncoder().encode(chunk));
+                    
+                    // 3. 发送流结束标志
+                    const doneChunk = `data: [DONE]\n\n`;
+                    controller.enqueue(new TextEncoder().encode(doneChunk));
+                    
+                    // 4. 关闭流
+                    controller.close();
+                }
+            });
+
+            // 5. 返回流式响应，并设置正确的头部信息
+            return new Response(stream, {
+                headers: {
+                    "Content-Type": "text/event-stream",
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "Access-Control-Allow-Origin": "*", // 确保 CORS 头部存在
+                },
+            });
             // ===============================================================
 
-            console.log("✅ Sending final payload to Cherry Studio:", JSON.stringify(responsePayload, null, 2));
-
-            return new Response(JSON.stringify(responsePayload), {
-                headers: { "Content-Type": "application/json" },
-            });
         } catch (error) {
             console.error("Error handling /v1/chat/completions request:", error);
             return createOpenAIErrorResponse(error.message);
         }
     }
     
-    // --- 原来的 Web UI 后端逻辑 (保持不变) ---
+    // --- 静态文件服务 (根据需要保留) ---
+    if (pathname === "/" || pathname.startsWith("/index.html") || pathname.startsWith("/style.css") || pathname.startsWith("/script.js")) {
+        return serveDir(req, { fsRoot: "static" });
+    }
+
+    // --- Web UI 后端逻辑 (根据需要保留) ---
     if (pathname === "/generate") { /* ... */ }
 
-    // --- 静态文件服务 (保持不变) ---
-    return serveDir(req, { fsRoot: "static", urlRoot: "" });
+    // 默认返回 404
+    return new Response("Not Found", { status: 404 });
 });
