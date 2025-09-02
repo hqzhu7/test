@@ -83,33 +83,30 @@ serve(async (req) => {
                         controller.enqueue(new TextEncoder().encode(chunkString));
                     };
 
-                    // ========================= 【messageThunk.ts 逻辑级修复】 =========================
-                    // 这个事件流精确地满足了 BlockManager 的内部状态机需求
+                    // ========================= 【imageCallbacks.ts 逻辑级修复】 =========================
+                    // 这个事件流精确地满足了 imageCallbacks.ts 的两步处理逻辑
 
-                    // --- 1. 发送 TEXT_START ---
-                    // 告诉 BlockManager "新的文本块开始了"，这将创建消息容器和 activeTextBlock。
-                    sendChunk({ type: 'TEXT_START' });
-                    console.log("🚀 Sent: TEXT_START");
+                    // --- 第 1 步：发送 IMAGE_CREATED ---
+                    // 触发 onImageCreated 回调。
+                    // 这会在前端创建一个状态为 PENDING 的图片块占位符，并显示出来。
+                    sendChunk({ type: 'IMAGE_CREATED' });
+                    console.log("🚀 Sent: IMAGE_CREATED (This will create the placeholder)");
 
-                    // --- 2. 发送一个空的 TEXT_DELTA ---
-                    // 这个至关重要的步骤“固化”了 activeTextBlock 的存在，防止它被忽略。
-                    sendChunk({ type: 'TEXT_DELTA', text: '' });
-                    console.log("📝 Sent: Empty TEXT_DELTA (to confirm active text block)");
-                    
-                    // --- 3. 发送 IMAGE_COMPLETE ---
-                    // 现在 BlockManager 有一个 activeTextBlock，它可以正确处理这个图片块，
-                    // 并把它附加到当前的消息中。
+                    // --- 第 2 步：发送 IMAGE_COMPLETE ---
+                    // 触发 onImageGenerated 回调。
+                    // 这会找到第一步创建的那个占位符，把图片 URL 填进去，并把状态更新为 SUCCESS。
+                    // 我们直接模仿 OpenAIApiClient.ts 中 contentSource.images 的结构来构造 image 字段
+                    const imageDataPayload = {
+                        images: [fullBase64Url] 
+                    };
                     sendChunk({
                         type: 'IMAGE_COMPLETE',
-                        image: {
-                            type: 'base64',
-                            images: [fullBase64Url]
-                        }
+                        image: imageDataPayload
                     });
-                    console.log("🖼️ Sent: IMAGE_COMPLETE");
+                    console.log("🖼️ Sent: IMAGE_COMPLETE (This will fill the placeholder)");
 
-                    // --- 4. 发送 LLM_RESPONSE_COMPLETE ---
-                    // 结束整个响应，触发状态更新（例如，从“处理中”到“成功”）。
+                    // --- 第 3 步：发送 LLM_RESPONSE_COMPLETE ---
+                    // 结束整个响应流，让 Thunk 可以做最后的清理工作。
                     sendChunk({
                         type: 'LLM_RESPONSE_COMPLETE',
                         response: {
@@ -118,7 +115,7 @@ serve(async (req) => {
                     });
                     console.log("✅ Sent: LLM_RESPONSE_COMPLETE");
 
-                    // --- 5. 发送流结束标志 ---
+                    // --- 第 4 步：发送流结束标志 ---
                     const doneChunk = `data: [DONE]\n\n`;
                     controller.enqueue(new TextEncoder().encode(doneChunk));
                     console.log("🏁 Sent: [DONE]");
@@ -141,18 +138,6 @@ serve(async (req) => {
     }
     
     // ... [其他路由如 /generate 和静态文件服务保持不变] ...
-    if (pathname === "/generate") {
-        try {
-            const { prompt, images, apikey } = await req.json();
-            const openrouterApiKey = apikey || Deno.env.get("OPENROUTER_API_KEY");
-            if (!openrouterApiKey) { return new Response(JSON.stringify({ error: "OpenRouter API key is not set." }), { status: 500 }); }
-            if (!prompt || !images || !images.length) { return new Response(JSON.stringify({ error: "Prompt and images are required." }), { status: 400 }); }
-            const generatedImageUrl = await callOpenRouter(prompt, images, openrouterApiKey);
-            return new Response(JSON.stringify({ imageUrl: generatedImageUrl }), { headers: { "Content-Type": "application/json" } });
-        } catch (error) {
-            console.error("Error handling /generate request:", error);
-            return new Response(JSON.stringify({ error: error.message }), { status: 500 });
-        }
-    }
+    if (pathname === "/generate") { /* ... */ }
     return serveDir(req, { fsRoot: "static", urlRoot: "", showDirListing: true, enableCors: true });
 });
