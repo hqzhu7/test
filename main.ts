@@ -3,18 +3,20 @@ import { serveDir } from "https://deno.land/std@0.200.0/http/file_server.ts";
 
 // --- 辅助函数：用于生成 OpenAI 格式的错误响应 ---
 function createOpenAIErrorResponse(message: string, statusCode = 500) {
-    return new Response(JSON.stringify({
+    const errorPayload = {
         error: {
             message: message,
             type: "server_error",
         }
-    }), {
+    };
+    console.error("Replying with error:", JSON.stringify(errorPayload, null, 2));
+    return new Response(JSON.stringify(errorPayload), {
         status: statusCode,
         headers: { "Content-Type": "application/json" }
     });
 }
 
-// --- 核心业务逻辑：调用 OpenRouter (从你的代码中提取并封装) ---
+// --- 核心业务逻辑：调用 OpenRouter ---
 async function callOpenRouter(prompt: string, images: string[], apiKey: string) {
     const contentPayload: any[] = [{ type: "text", text: prompt }];
 
@@ -25,7 +27,6 @@ async function callOpenRouter(prompt: string, images: string[], apiKey: string) 
                 image_url: { url: imageUrl }
             });
         }
-        // 如果有图片，可以考虑修改一下提示词
         if(contentPayload[0].text){
            contentPayload[0].text = `根据我上传的这 ${images.length} 张图片，${prompt}`;
         }
@@ -34,8 +35,7 @@ async function callOpenRouter(prompt: string, images: string[], apiKey: string) 
     const openrouterPayload = {
         model: "google/gemini-2.5-flash-image-preview:free",
         messages: [{ role: "user", content: contentPayload }],
-        // Deno Deploy 上的免费套餐可能不支持流式响应，我们这里直接设置为 false
-        stream: false 
+        stream: false
     };
 
     console.log("Sending payload to OpenRouter:", JSON.stringify(openrouterPayload, null, 2));
@@ -66,11 +66,9 @@ async function callOpenRouter(prompt: string, images: string[], apiKey: string) 
     const messageContent = message.content || "";
     let imageUrl = '';
 
-    // 优先从 message.content 中提取 Base64 图像
     if (messageContent.startsWith('data:image/')) {
         imageUrl = messageContent;
     }
-    // 备用方案，如果模型返回了 images 字段
     else if (message.images && message.images.length > 0 && message.images[0].image_url?.url) {
         imageUrl = message.images[0].image_url.url;
     }
@@ -87,18 +85,15 @@ async function callOpenRouter(prompt: string, images: string[], apiKey: string) 
 serve(async (req) => {
     const pathname = new URL(req.url).pathname;
 
-    // --- 新增功能: 兼容 OpenAI API 的端点 ---
-    // Cherry Studio 会将请求发送到这个路径
+    // --- 兼容 OpenAI API 的端点 ---
     if (pathname === "/v1/chat/completions") {
         try {
-            // 1. 从请求头获取 API 密钥
             const authHeader = req.headers.get("Authorization");
             if (!authHeader || !authHeader.startsWith("Bearer ")) {
                 return createOpenAIErrorResponse("Authorization header is missing or invalid.", 401);
             }
-            const openrouterApiKey = authHeader.substring(7); // "Bearer ".length
+            const openrouterApiKey = authHeader.substring(7);
 
-            // 2. 解析 OpenAI 格式的请求体
             const openaiRequest = await req.json();
             const userMessage = openaiRequest.messages?.find((m: any) => m.role === 'user');
 
@@ -106,7 +101,6 @@ serve(async (req) => {
                 return createOpenAIErrorResponse("Invalid request: No user message found.", 400);
             }
 
-            // 3. 提取提示词和图片
             let prompt = "";
             const images: string[] = [];
             
@@ -126,10 +120,10 @@ serve(async (req) => {
                 return createOpenAIErrorResponse("Invalid request: Prompt text is missing.", 400);
             }
 
-            // 4. 调用核心逻辑
             const generatedImageUrl = await callOpenRouter(prompt, images, openrouterApiKey);
 
-            // 5. 将结果包装成 OpenAI 格式的响应
+            // ========================= 【关键修复】 =========================
+            // 将结果包装成符合 OpenAI 多模态规范的响应
             const responsePayload = {
                 id: `chatcmpl-${crypto.randomUUID()}`,
                 object: "chat.completion",
@@ -139,18 +133,28 @@ serve(async (req) => {
                     index: 0,
                     message: {
                         role: "assistant",
-                        // 直接将 Base64 字符串作为 content 返回
-                        // 大多数客户端（包括CherryStudio）能够直接渲染
-                        content: generatedImageUrl,
+                        // 核心改动：content 必须是一个包含图片对象的数组
+                        content: [
+                            {
+                                type: "image_url",
+                                image_url: {
+                                    "url": generatedImageUrl
+                                }
+                            }
+                        ]
                     },
                     finish_reason: "stop"
                 }],
                 usage: {
-                    prompt_tokens: 0, // 可以设为0，因为计算复杂
+                    prompt_tokens: 0,
                     completion_tokens: 0,
                     total_tokens: 0
                 }
             };
+            // ===============================================================
+
+            // --- 【新增调试日志】 打印最终返回给 Cherry Studio 的内容 ---
+            console.log("✅ Sending final payload to Cherry Studio:", JSON.stringify(responsePayload, null, 2));
 
             return new Response(JSON.stringify(responsePayload), {
                 headers: { "Content-Type": "application/json" },
@@ -162,20 +166,19 @@ serve(async (req) => {
         }
     }
     
-    // --- 你原来的 Web UI 后端逻辑 (保持不变) ---
+    // --- 原来的 Web UI 后端逻辑 (保持不变) ---
     if (pathname === "/generate") {
         try {
             const { prompt, images, apikey } = await req.json();
             const openrouterApiKey = apikey || Deno.env.get("OPENROUTER_API_KEY");
 
             if (!openrouterApiKey) {
-                return new Response(JSON.stringify({ error: "OpenRouter API key is not set." }), { status: 500, headers: { "Content-Type": "application/json" } });
+                return new Response(JSON.stringify({ error: "OpenRouter API key is not set." }), { status: 500 });
             }
             if (!prompt || !images || images.length === 0) {
-                 return new Response(JSON.stringify({ error: "Prompt and images are required." }), { status: 400, headers: { "Content-Type": "application/json" } });
+                 return new Response(JSON.stringify({ error: "Prompt and images are required." }), { status: 400 });
             }
             
-            // 直接调用封装好的核心逻辑
             const generatedImageUrl = await callOpenRouter(prompt, images, openrouterApiKey);
 
             return new Response(JSON.stringify({ imageUrl: generatedImageUrl }), {
@@ -184,12 +187,11 @@ serve(async (req) => {
 
         } catch (error) {
             console.error("Error handling /generate request:", error);
-            return new Response(JSON.stringify({ error: error.message }), { status: 500, headers: { "Content-Type": "application/json" } });
+            return new Response(JSON.stringify({ error: error.message }), { status: 500 });
         }
     }
 
     // --- 静态文件服务 (保持不变) ---
-    // 将 index.html, style.css, script.js 放在 static 文件夹中
     return serveDir(req, {
         fsRoot: "static", 
         urlRoot: "",
