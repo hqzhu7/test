@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>nano banana</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <h1 class="title">🍌 nano banana</h1>
+    <p class="subtitle">(模型: google/gemini-2.5-flash-image-preview:free)</p>
+    <div class="main-container">
+        <div class="controls-container">
+            <div class="api-key-section">
+                <h2>设置</h2>
+                <input type="password" id="api-key-input" placeholder="输入你的 OpenRouter API 密钥 (必填)">
+            </div>
+            <div class="upload-section">
+                <h2>1. 上传图片</h2>
+                <div class="upload-area">
+                    <input type="file" id="image-upload" accept="image/*" multiple>
+                    <label for="image-upload">
+                        <p>点击或拖拽上传</p>
+                        <span>支持多张图片</span>
+                    </label>
+                </div>
+                <div id="thumbnails-container"></div>
+            </div>
+
+            <div class="prompt-section">
+                <h2>2. 输入提示词</h2>
+                <textarea id="prompt-input" placeholder="例如：一只穿着超级英雄斗篷的猫，电影级灯光"></textarea>
+            </div>
+
+            <button id="generate-btn">
+                <span class="btn-text">生成</span>
+                <span class="spinner hidden"></span>
+            </button>
+        </div>
+
+        <div class="result-container">
+            <h2>生成结果</h2>
+            <div id="result-image-container">
+                <p>生成的图片将显示在这里</p>
+            </div>
+        </div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
