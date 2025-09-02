@@ -77,6 +77,7 @@ document.addEventListener('DOMContentLoaded', () => {
         reader.readAsDataURL(file);
     }
 
+    // --- 核心修改区域开始 ---
     generateBtn.addEventListener('click', async () => {
         if (!apiKeyInput.value.trim()) {
             alert('请输入 OpenRouter API 密钥');
@@ -96,52 +97,32 @@ document.addEventListener('DOMContentLoaded', () => {
         setLoading(true);
 
         try {
-            // 处理第一张图片
-            const file = selectedFiles[0];
-            const base64Image = await fileToBase64(file);
+            // 1. 创建一个 Promise 数组，用于将所有选中的文件转换为 Base64
+            const conversionPromises = selectedFiles.map(file => fileToBase64(file));
             
-            const response = await fetch('/v1/chat/completions', {
+            // 2. 等待所有文件转换完成
+            const base64Images = await Promise.all(conversionPromises);
+            
+            // 3. 发送包含 images 数组的请求
+            const response = await fetch('/generate', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    model: "gpt-4o", // 可以根据需要调整模型
-                    messages: [
-                        {
-                            role: "user",
-                            content: [
-                                { type: "text", text: promptInput.value },
-                                { type: "image_url", image_url: { url: base64Image } }
-                            ]
-                        }
-                    ],
-                    max_tokens: 4000,
-                    // 可以在这里添加其他 OpenAI API 参数，例如 temperature, top_p 等
+                    prompt: promptInput.value,
+                    images: base64Images, // 注意：这里从 'image' 改为了 'images'，并且值是一个数组
+                    apikey: apiKeyInput.value
                 })
             });
 
             const data = await response.json();
 
-            // 检查响应是否包含预期的 OpenAI 格式
-            if (data.choices && data.choices.length > 0 && data.choices[0].message && data.choices[0].message.content) {
-                const content = data.choices[0].message.content;
-                // 尝试从 content 中提取图片 URL
-                const imageUrlMatch = content.match(/\((https?:\/\/[^)]+\.(?:png|jpg|jpeg|gif|webp))\)/);
-                if (imageUrlMatch && imageUrlMatch[1]) {
-                    displayResult(imageUrlMatch[1]);
-                } else if (content.startsWith('data:image')) {
-                    // 如果 content 是 Base64 编码的图片数据 URL
-                    displayResult(content);
-                } else {
-                    // 如果 content 是纯文本，显示为错误或提示
-                    throw new Error('API 返回的不是图片 URL，而是文本内容：' + content);
-                }
-            } else if (data.error) {
-                throw new Error(data.error.message || data.error);
-            } else {
-                throw new Error('API 返回的响应格式不符合预期。');
+            if (data.error) {
+                throw new Error(data.error);
             }
+
+            displayResult(data.imageUrl);
         } catch (error) {
             alert('Error: ' + error.message);
             resultContainer.innerHTML = `<p>Error: ${error.message}</p>`;
@@ -149,6 +130,7 @@ document.addEventListener('DOMContentLoaded', () => {
             setLoading(false);
         }
     });
+    // --- 核心修改区域结束 ---
 
     function setLoading(isLoading) {
         generateBtn.disabled = isLoading;
