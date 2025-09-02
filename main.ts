@@ -1,7 +1,6 @@
 import { serve } from "https://deno.land/std@0.200.0/http/server.ts";
 import { serveDir } from "https://deno.land/std@0.200.0/http/file_server.ts";
 
-// ... [createOpenAIErrorResponse 和 callOpenRouter 函数保持不变] ...
 // --- 辅助函数：用于生成 OpenAI 格式的错误响应 ---
 function createOpenAIErrorResponse(message: string, statusCode = 500) {
     const errorPayload = {
@@ -51,9 +50,11 @@ async function callOpenRouter(prompt: string, images: string[], apiKey: string):
     }
     const messageContent = message.content || "";
     let imageUrl = '';
+    // 优先从 message.content 中提取 Base64 图像
     if (messageContent.startsWith('data:image/')) {
         imageUrl = messageContent;
     }
+    // 备用方案，如果模型返回了 images 字段
     else if (message.images && message.images.length > 0 && message.images[0].image_url?.url) {
         imageUrl = message.images[0].image_url.url;
     }
@@ -63,97 +64,113 @@ async function callOpenRouter(prompt: string, images: string[], apiKey: string):
     }
     return imageUrl;
 }
+
 // --- 主服务逻辑 ---
 serve(async (req) => {
     const pathname = new URL(req.url).pathname;
 
-    if (req.method === 'OPTIONS') { /* ... [CORS 预检代码不变] */ }
-
+    // 添加 OPTIONS 方法处理，用于 CORS 预检请求
+    if (req.method === 'OPTIONS') {
+        return new Response(null, {
+            status: 204,
+            headers: {
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key, X-Stainless-Retry-Count, X-Stainless-Timeout, Traceparent",
+            },
+        });
+    }
+    
+    // --- 兼容 OpenAI API 的端点 ---
     if (pathname === "/v1/chat/completions") {
         try {
+            console.log("🎁 Received Headers from Cherry Studio:", JSON.stringify(Object.fromEntries(req.headers.entries()), null, 2));
             const openaiRequest = await req.json();
-            // ... [请求解析和认证代码不变]
+            console.log("📦 Received Body from Cherry Studio:", JSON.stringify(openaiRequest, null, 2));
 
             const authHeader = req.headers.get("Authorization");
-            if (!authHeader || !authHeader.startsWith("Bearer ")) { return createOpenAIErrorResponse("Auth header missing", 401); }
+            if (!authHeader || !authHeader.startsWith("Bearer ")) {
+                return createOpenAIErrorResponse("Authorization header is missing or invalid.", 401);
+            }
             const openrouterApiKey = authHeader.substring(7);
             const userMessage = openaiRequest.messages?.find((m: any) => m.role === 'user');
-            const requestedModel = openaiRequest.model || 'gpt-4o';
-            if (!userMessage || !userMessage.content) { return createOpenAIErrorResponse("No user message", 400); }
-            let prompt = ""; const images: string[] = [];
+            // 注意：requestedModel 在 Cherry Studio 的 Response API 模式下可能不是直接使用，但保留以防万一
+            const requestedModel = openaiRequest.model || 'gpt-4o'; 
+
+            if (!userMessage || !userMessage.content) {
+                return createOpenAIErrorResponse("Invalid request: No user message found.", 400);
+            }
+
+            let prompt = "";
+            const images: string[] = [];
             if (Array.isArray(userMessage.content)) {
                 for (const part of userMessage.content) {
                     if (part.type === 'text') { prompt = part.text; } 
                     else if (part.type === 'image_url' && part.image_url?.url) { images.push(part.image_url.url); }
                 }
-            } else { prompt = userMessage.content as string; }
-            if (!prompt) { return createOpenAIErrorResponse("Prompt is missing", 400); }
+            } else if (typeof userMessage.content === 'string') { // 如果 content 是纯字符串
+                prompt = userMessage.content;
+            }
 
-            const generatedImageUrl = await callOpenRouter(prompt, images, openrouterApiKey);
+            if (!prompt) { return createOpenAIErrorResponse("Invalid request: Prompt text is missing.", 400); }
+            
+            // callOpenRouter 返回的 Base64 字符串是包含 "data:image/png;base64," 前缀的
+            const fullBase64Url = await callOpenRouter(prompt, images, openrouterApiKey);
+            // 我们需要去掉这个前缀，因为 Cherry Studio 的 `partial_image_b64` 期望的是纯 Base64 数据
+            const base64Data = fullBase64Url.split(',')[1];
 
             const stream = new ReadableStream({
                 start(controller) {
-                    const-child-processes uuid = crypto.randomUUID();
-                    const created = Math.floor(Date.now() / 1000);
-
-                    // ========================= 【代码分析级修复】 =========================
-                    // 模拟一个多步流，这与 Cherry Studio 的状态累积逻辑完全匹配
-
-                    // --- 第 1 块：初始化块 ---
-                    // 这个块告诉客户端：一个新的助手消息已经开始，角色是 assistant，内容是一个空的数组。
-                    // 这会在客户端状态中创建一个新的、等待填充的消息对象。
-                    const initialChunkPayload = {
-                        id: `chatcmpl-${uuid}`,
-                        object: "chat.completion.chunk",
-                        created: created,
-                        model: requestedModel,
-                        choices: [{
-                            index: 0,
-                            delta: {
-                                role: "assistant",
-                                content: [], // 发送一个空数组来初始化多模态内容
-                            },
-                            finish_reason: null
-                        }]
+                    // 封装一个发送 chunk 的辅助函数
+                    const sendChunk = (data: object) => {
+                        const chunkString = `data: ${JSON.stringify(data)}\n\n`;
+                        controller.enqueue(new TextEncoder().encode(chunkString));
                     };
-                    const initialChunk = `data: ${JSON.stringify(initialChunkPayload)}\n\n`;
-                    controller.enqueue(new TextEncoder().encode(initialChunk));
-                    console.log("🚀 Sending Step 1: Initial Chunk");
 
-                    // --- 第 2 块：数据块 ---
-                    // 这个块包含了真正的图片数据。客户端的累积逻辑会将这个 content 数组
-                    // 与上一步创建的空数组进行合并/追加，从而填充消息。
-                    const dataChunkPayload = {
-                        id: `chatcmpl-${uuid}`,
-                        object: "chat.completion.chunk",
-                        created: created,
-                        model: requestedModel,
-                        choices: [{
-                            index: 0,
-                            delta: {
-                                // 注意：这里不再需要 role，因为第一步已经定义了
-                                content: [
-                                    { type: "text", text: "" }, // 保持一个空的文本部分
-                                    { type: "image_url", image_url: { "url": generatedImageUrl } }
-                                ]
-                            },
-                            finish_reason: "stop" // 在最后一个数据块中标注结束
-                        }],
-                        usage: { prompt_tokens: 50, completion_tokens: 700, total_tokens: 750 } // usage 也放在最后
-                    };
-                    const dataChunk = `data: ${JSON.stringify(dataChunkPayload)}\n\n`;
-                    // 添加一个微小的延迟，模拟真实的网络延迟，有时可以帮助客户端更好地处理流
-                    setTimeout(() => {
-                        controller.enqueue(new TextEncoder().encode(dataChunk));
-                        console.log("🖼️ Sending Step 2: Data Chunk");
-                        
-                        // --- 结束标志 ---
-                        const doneChunk = `data: [DONE]\n\n`;
-                        controller.enqueue(new TextEncoder().encode(doneChunk));
-                        console.log("🏁 Sending [DONE]");
+                    // ========================= 【基于代码分析的最终修复】 =========================
+                    // 根据 Cherry Studio 的 OpenAIResponseAPIClient.ts，我们必须发送这种特定类型的 chunk
 
-                        controller.close();
-                    }, 50); // 50毫秒延迟
+                    // 1. 发送 "开始生成" 信号 (对应 case 'response.image_generation_call.generating')
+                    sendChunk({
+                        type: 'response.image_generation_call.generating'
+                    });
+                    console.log("🚀 Sent: image_generation_call.generating");
+
+                    // 2. 发送包含图片数据的 "部分图片" 信号 (对应 case 'response.image_generation_call.partial_image')
+                    // 即使图片是完整的，我们也用 partial_image 类型发送，完全匹配它的处理逻辑
+                    sendChunk({
+                        type: 'response.image_generation_call.partial_image',
+                        partial_image_b64: base64Data // 发送不带前缀的 Base64 数据
+                    });
+                    console.log("🖼️ Sent: image_generation_call.partial_image with data");
+
+                    // 3. 发送 "完成" 信号 (对应 case 'response.image_generation_call.completed')
+                    sendChunk({
+                        type: 'response.image_generation_call.completed'
+                    });
+                    console.log("✅ Sent: image_generation_call.completed");
+                    
+                    // 4. (重要) 发送一个最终的 `response.completed` 块，并包含伪造的 usage
+                    // 这个块会触发 LLM_RESPONSE_COMPLETE 事件，让客户端知道整个交互结束了
+                    // 并且会更新 token 使用量信息
+                    sendChunk({
+                        type: 'response.completed',
+                        response: {
+                           usage: {
+                                input_tokens: 50,      // 伪造值
+                                output_tokens: 700,    // 伪造值
+                                total_tokens: 750      // 伪造值
+                           }
+                        }
+                    });
+                    console.log("🏁 Sent: response.completed with usage");
+
+                    // 5. 发送流结束标志
+                    const doneChunk = `data: [DONE]\n\n`;
+                    controller.enqueue(new TextEncoder().encode(doneChunk));
+                    console.log("🏁 Sent: [DONE]");
+                    
+                    controller.close();
                     // ===============================================================
                 }
             });
@@ -161,16 +178,50 @@ serve(async (req) => {
             return new Response(stream, {
                 headers: {
                     "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive",
-                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Origin": "*", // 确保 CORS 头部存在
                 },
             });
 
         } catch (error) {
             console.error("Error handling /v1/chat/completions request:", error);
+            // 错误响应不应该走流式，直接返回 JSON 错误
             return createOpenAIErrorResponse(error.message);
         }
     }
     
-    // ... 其他路由 ...
-    return new Response("Not Found", { status: 404 });
+    // --- 原来的 Web UI 后端逻辑 ---
+    if (pathname === "/generate") {
+        try {
+            const { prompt, images, apikey } = await req.json();
+            const openrouterApiKey = apikey || Deno.env.get("OPENROUTER_API_KEY");
+
+            if (!openrouterApiKey) {
+                return new Response(JSON.stringify({ error: "OpenRouter API key is not set." }), { status: 500, headers: { "Content-Type": "application/json" } });
+            }
+            if (!prompt || !images || images.length === 0) {
+                 return new Response(JSON.stringify({ error: "Prompt and images are required." }), { status: 400, headers: { "Content-Type": "application/json" } });
+            }
+            
+            const generatedImageUrl = await callOpenRouter(prompt, images, openrouterApiKey);
+
+            return new Response(JSON.stringify({ imageUrl: generatedImageUrl }), {
+                headers: { "Content-Type": "application/json" },
+            });
+
+        } catch (error) {
+            console.error("Error handling /generate request:", error);
+            return new Response(JSON.stringify({ error: error.message }), { status: 500, headers: { "Content-Type": "application/json" } });
+        }
+    }
+
+    // --- 静态文件服务 ---
+    // 为了让 Web UI 能正常访问，这里需要更灵活。
+    // 如果你只用 Deno Deploy 做 Cherry Studio 代理，可以删除这部分或更严格。
+    // 如果 Web UI 和代理在同一个 Deno Deploy 实例，确保 'static' 文件夹存在并包含前端文件。
+    return serveDir(req, {
+        fsRoot: "static", // 确保你的 index.html, style.css, script.js 在 'static' 文件夹内
+        urlRoot: "",      // 从根路径开始提供服务
+        showDirListing: false, // 部署时通常设置为 false
+        enableCors: true,    // 允许跨域
+    });
 });
