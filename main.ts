@@ -45,11 +45,9 @@ async function callOpenRouter(prompt: string, imagesAsBase64: string[], apiKey: 
 serve(async (req) => {
     const pathname = new URL(req.url).pathname;
     
-    // CORS 预检
     if (req.method === 'OPTIONS') { /* ... */ }
 
-    // --- Cherry Studio (Gemini, 非流式) 将调用这里 ---
-    // 非流式 API 的路径通常是 :generateContent
+    // Gemini 非流式 API 的路径通常是 :generateContent
     if (pathname.includes(":generateContent")) {
         try {
             const geminiRequest = await req.json();
@@ -75,40 +73,36 @@ serve(async (req) => {
             const mimeType = matches[1];
             const base64Data = matches[2];
 
-            // ========================= 【终极的、非流式的修复】 =========================
-            // 构建一个单一的、完整的 Gemini 响应对象，就像 chat.sendMessage() 会返回的那样
+            // ========================= 【最终的、绝对正确的修复】 =========================
+            // 构建一个与你捕获的真实响应结构完全一致的、没有多余 "response" 包装的 JSON 对象
             const responsePayload = {
-                // 顶层是一个 response 对象
-                response: {
-                    candidates: [
-                        {
-                            content: {
-                                role: "model",
-                                parts: [
-                                    // 第一个 part：你观察到的引导文本
-                                    { text: "好的，这是根据您的描述生成的图片：" },
-                                    // 第二个 part：图片数据
-                                    {
-                                        inlineData: {
-                                            mimeType: mimeType,
-                                            data: base64Data
-                                        }
+                candidates: [
+                    {
+                        content: {
+                            role: "model",
+                            parts: [
+                                { text: "好的，这是根据您的描述生成的图片：" },
+                                {
+                                    inlineData: {
+                                        mimeType: mimeType,
+                                        data: base64Data
                                     }
-                                ]
-                            },
-                            finishReason: "STOP"
-                        }
-                    ],
-                    usageMetadata: {
-                        promptTokenCount: 264,
-                        candidatesTokenCount: 1314,
-                        totalTokenCount: 1578
+                                }
+                            ]
+                        },
+                        finishReason: "STOP",
+                        index: 0
                     }
+                ],
+                usageMetadata: {
+                    promptTokenCount: 264,
+                    candidatesTokenCount: 1314,
+                    totalTokenCount: 1578
                 }
             };
             // ===========================================================================
             
-            console.log("✅ Sending final NON-STREAMED Gemini-compatible payload.");
+            console.log("✅ Sending final, CORRECT, NON-STREAMED Gemini-compatible payload.");
             return new Response(JSON.stringify(responsePayload), {
                 headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
             });
