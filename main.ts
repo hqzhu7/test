@@ -96,6 +96,9 @@ serve(async (req) => {
 
             const openaiRequest = await req.json();
             const userMessage = openaiRequest.messages?.find((m: any) => m.role === 'user');
+            
+            // <-- 新增: 从原始请求中捕获模型名称
+            const requestedModel = openaiRequest.model || 'gpt-4o'; // 如果请求没带模型名，给个默认值
 
             if (!userMessage || !userMessage.content) {
                 return createOpenAIErrorResponse("Invalid request: No user message found.", 400);
@@ -122,18 +125,15 @@ serve(async (req) => {
 
             const generatedImageUrl = await callOpenRouter(prompt, images, openrouterApiKey);
 
-            // ========================= 【关键修复】 =========================
-            // 将结果包装成符合 OpenAI 多模态规范的响应
             const responsePayload = {
                 id: `chatcmpl-${crypto.randomUUID()}`,
                 object: "chat.completion",
                 created: Math.floor(Date.now() / 1000),
-                model: "google/gemini-2.5-flash-image-preview:free",
+                model: requestedModel, // <-- 关键修改: 使用从请求中捕获的模型名称
                 choices: [{
                     index: 0,
                     message: {
                         role: "assistant",
-                        // 核心改动：content 必须是一个包含图片对象的数组
                         content: [
                             {
                                 type: "image_url",
@@ -151,9 +151,7 @@ serve(async (req) => {
                     total_tokens: 0
                 }
             };
-            // ===============================================================
-
-            // --- 【新增调试日志】 打印最终返回给 Cherry Studio 的内容 ---
+            
             console.log("✅ Sending final payload to Cherry Studio:", JSON.stringify(responsePayload, null, 2));
 
             return new Response(JSON.stringify(responsePayload), {
@@ -168,6 +166,7 @@ serve(async (req) => {
     
     // --- 原来的 Web UI 后端逻辑 (保持不变) ---
     if (pathname === "/generate") {
+        // ... (这部分代码无需改动)
         try {
             const { prompt, images, apikey } = await req.json();
             const openrouterApiKey = apikey || Deno.env.get("OPENROUTER_API_KEY");
