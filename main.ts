@@ -64,7 +64,6 @@ serve(async (req) => {
             if (!authHeader || !authHeader.startsWith("Bearer ")) { return createOpenAIErrorResponse("Authorization header missing", 401); }
             const openrouterApiKey = authHeader.substring(7);
             const userMessage = openaiRequest.messages?.find((m: any) => m.role === 'user');
-            const requestedModel = openaiRequest.model || 'gpt-4o';
             if (!userMessage || !userMessage.content) { return createOpenAIErrorResponse("No user message", 400); }
             let prompt = ""; const images: string[] = [];
             if (Array.isArray(userMessage.content)) {
@@ -84,45 +83,42 @@ serve(async (req) => {
                         controller.enqueue(new TextEncoder().encode(chunkString));
                     };
 
-                    // ========================= 【Redux 逻辑级修复】 =========================
-                    // 这个响应流精确地模拟了能被 newMessage.ts 和 messageBlock.ts 正确处理的事件顺序
+                    // ========================= 【messageThunk.ts 逻辑级修复】 =========================
+                    // 这个事件流精确地满足了 BlockManager 的内部状态机需求
 
                     // --- 1. 发送 TEXT_START ---
-                    // 这个事件会触发 Thunk 创建一个新的、空的助手消息（如果还没有的话），
-                    // 并在这条消息里创建一个空的文本块。这是后续所有内容的“容器”。
+                    // 告诉 BlockManager "新的文本块开始了"，这将创建消息容器和 activeTextBlock。
                     sendChunk({ type: 'TEXT_START' });
-                    console.log("🚀 Sent: TEXT_START (to create message container)");
+                    console.log("🚀 Sent: TEXT_START");
 
-                    // --- 2. 发送 IMAGE_COMPLETE ---
-                    // 现在已经有了一个消息容器，这个事件会触发 Thunk 创建一个图片块，
-                    // 并将这个图片块的 ID 添加到当前消息的 blocks 数组中。
-                    // `OpenAIApiClient.ts` 会将非标准的 `images` 字段转换成这个标准的 `IMAGE_COMPLETE` chunk。
-                    // 因此，我们直接发送它在转换后会产生的 chunk。
+                    // --- 2. 发送一个空的 TEXT_DELTA ---
+                    // 这个至关重要的步骤“固化”了 activeTextBlock 的存在，防止它被忽略。
+                    sendChunk({ type: 'TEXT_DELTA', text: '' });
+                    console.log("📝 Sent: Empty TEXT_DELTA (to confirm active text block)");
+                    
+                    // --- 3. 发送 IMAGE_COMPLETE ---
+                    // 现在 BlockManager 有一个 activeTextBlock，它可以正确处理这个图片块，
+                    // 并把它附加到当前的消息中。
                     sendChunk({
                         type: 'IMAGE_COMPLETE',
                         image: {
                             type: 'base64',
-                            images: [fullBase64Url] // 发送完整的 Base64 URL
+                            images: [fullBase64Url]
                         }
                     });
                     console.log("🖼️ Sent: IMAGE_COMPLETE");
 
-                    // --- 3. 发送 LLM_RESPONSE_COMPLETE ---
-                    // 这个事件告诉 Thunk，这次 LLM 的回复已经完全结束。
-                    // Thunk 会做一些清理工作，比如把消息状态从“处理中”更新为“成功”。
+                    // --- 4. 发送 LLM_RESPONSE_COMPLETE ---
+                    // 结束整个响应，触发状态更新（例如，从“处理中”到“成功”）。
                     sendChunk({
                         type: 'LLM_RESPONSE_COMPLETE',
                         response: {
-                            usage: {
-                                prompt_tokens: 50,
-                                completion_tokens: 700,
-                                total_tokens: 750
-                            }
+                            usage: { prompt_tokens: 50, completion_tokens: 700, total_tokens: 750 }
                         }
                     });
                     console.log("✅ Sent: LLM_RESPONSE_COMPLETE");
 
-                    // --- 4. 发送流结束标志 ---
+                    // --- 5. 发送流结束标志 ---
                     const doneChunk = `data: [DONE]\n\n`;
                     controller.enqueue(new TextEncoder().encode(doneChunk));
                     console.log("🏁 Sent: [DONE]");
@@ -145,7 +141,6 @@ serve(async (req) => {
     }
     
     // ... [其他路由如 /generate 和静态文件服务保持不变] ...
-    // --- 原来的 Web UI 后端逻辑 ---
     if (pathname === "/generate") {
         try {
             const { prompt, images, apikey } = await req.json();
@@ -159,7 +154,5 @@ serve(async (req) => {
             return new Response(JSON.stringify({ error: error.message }), { status: 500 });
         }
     }
-
-    // --- 静态文件服务 (服务于你的 Web UI) ---
     return serveDir(req, { fsRoot: "static", urlRoot: "", showDirListing: true, enableCors: true });
 });
