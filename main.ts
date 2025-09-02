@@ -45,9 +45,12 @@ async function callOpenRouter(prompt: string, imagesAsBase64: string[], apiKey: 
 serve(async (req) => {
     const pathname = new URL(req.url).pathname;
     
+    // CORS 预检
     if (req.method === 'OPTIONS') { /* ... */ }
 
-    if (pathname.includes(":streamGenerateContent")) {
+    // --- Cherry Studio (Gemini, 非流式) 将调用这里 ---
+    // 非流式 API 的路径通常是 :generateContent
+    if (pathname.includes(":generateContent")) {
         try {
             const geminiRequest = await req.json();
             const authHeader = req.headers.get("Authorization");
@@ -72,61 +75,46 @@ serve(async (req) => {
             const mimeType = matches[1];
             const base64Data = matches[2];
 
-            const stream = new ReadableStream({
-                async start(controller) {
-                    const sendChunk = (data: object) => {
-                        // ========================= 【最终的、无可辩驳的修复】 =========================
-                        // 模仿你捕获到的、由换行符分隔的、没有 "data:" 前缀的 JSON 对象流
-                        const chunkString = `${JSON.stringify(data)}\n`;
-                        // ===========================================================================
-                        controller.enqueue(new TextEncoder().encode(chunkString));
-                    };
-                    
-                    const introText = "好的，这是根据您的描述生成的图片：";
-                    const textParts = introText.split('');
-
-                    for (const char of textParts) {
-                        const textChunk = {
-                            candidates: [{
-                                content: { role: "model", parts: [{ text: char }] }
-                            }]
-                        };
-                        sendChunk(textChunk);
-                        await new Promise(resolve => setTimeout(resolve, 5)); 
+            // ========================= 【终极的、非流式的修复】 =========================
+            // 构建一个单一的、完整的 Gemini 响应对象，就像 chat.sendMessage() 会返回的那样
+            const responsePayload = {
+                // 顶层是一个 response 对象
+                response: {
+                    candidates: [
+                        {
+                            content: {
+                                role: "model",
+                                parts: [
+                                    // 第一个 part：你观察到的引导文本
+                                    { text: "好的，这是根据您的描述生成的图片：" },
+                                    // 第二个 part：图片数据
+                                    {
+                                        inlineData: {
+                                            mimeType: mimeType,
+                                            data: base64Data
+                                        }
+                                    }
+                                ]
+                            },
+                            finishReason: "STOP"
+                        }
+                    ],
+                    usageMetadata: {
+                        promptTokenCount: 264,
+                        candidatesTokenCount: 1314,
+                        totalTokenCount: 1578
                     }
-                    console.log("🚀 Sent: All Text Chunks");
-
-                    const imageChunk = {
-                        candidates: [{
-                            content: { role: "model", parts: [{
-                                inlineData: { mimeType: mimeType, data: base64Data }
-                            }]}
-                        }]
-                    };
-                    sendChunk(imageChunk);
-                    console.log("🖼️ Sent: Image Chunk");
-
-                    const finishChunk = {
-                        candidates: [{
-                            finishReason: "STOP",
-                            content: { role: "model", parts: [] }
-                        }],
-                        usageMetadata: { promptTokenCount: 264, candidatesTokenCount: 1314, totalTokenCount: 1578 }
-                    };
-                    sendChunk(finishChunk);
-                    console.log("✅ Sent: Finish Chunk");
-                    
-                    controller.close();
                 }
-            });
+            };
+            // ===========================================================================
             
-            // 响应头 Content-Type 可能是 application/x-ndjson (Newline Delimited JSON) 或 text/plain
-            // 我们继续使用 application/json，因为客户端似乎能处理
-            return new Response(stream, {
+            console.log("✅ Sending final NON-STREAMED Gemini-compatible payload.");
+            return new Response(JSON.stringify(responsePayload), {
                 headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
             });
+
         } catch (error) {
-            console.error("Error in Gemini handler:", error);
+            console.error("Error in Gemini NON-STREAM handler:", error);
             return createJsonErrorResponse(error.message || "An unknown error occurred", 500);
         }
     }
